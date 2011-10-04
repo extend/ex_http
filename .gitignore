@@ -1,0 +1,7 @@
+/deps/
+/doc/
+/ebin/
+/logs/
+/test/*.beam
+.ex_http_dialyzer.plt
+erl_crash.dump
