@@ -15,16 +15,16 @@
 -module(ex_multipart).
 -author('Anthony Ramine <nox@dev-extend.eu>').
 
--type part_parser() :: parser(part_result()).
+-type part_parser() :: parser(more(part_result())).
 -type parser(T) :: fun((binary()) -> T).
--type part_result() :: more(headers() | eof).
 -type more(T) :: T | {more, parser(T)}.
+-type part_result() :: headers() | eof.
 -type headers() :: {headers, http_headers(), body_cont()}.
 -type http_headers() :: [{atom() | binary(), binary()}].
--type body_cont() :: cont(body()).
+-type body_cont() :: cont(more(body_result())).
 -type cont(T) :: fun(() -> T).
--type body() :: more({body, binary(), body_cont()} | end_of_part()).
--type end_of_part() :: {end_of_part, cont(part_result())}.
+-type body_result() :: {body, binary(), body_cont()} | end_of_part().
+-type end_of_part() :: {end_of_part, cont(more(part_result()))}.
 
 -export([parser/1]).
 
@@ -35,7 +35,7 @@ parser(Boundary) when is_binary(Boundary) ->
   fun (Bin) when is_binary(Bin) -> parse(Bin, Boundary) end.
 
 
--spec parse(binary(), binary()) -> part_result().
+-spec parse(binary(), binary()) -> more(part_result()).
 parse(Bin, Boundary) when byte_size(Bin) >= byte_size(Boundary) + 2 ->
   BoundarySize = byte_size(Boundary),
   Pattern = pattern(Boundary),
@@ -58,7 +58,7 @@ pattern(Boundary) ->
 -type pattern() :: {binary:cp(), pos()}.
 -type pos() :: non_neg_integer().
 
--spec parse_boundary_tail(binary(), pattern(), pos()) -> part_result().
+-spec parse_boundary_tail(binary(), pattern(), pos()) -> more(part_result()).
 parse_boundary_tail(Bin, Pattern, I) when I + 1 < byte_size(Bin) ->
   case binary:at(Bin, I) =:= $- andalso binary:at(Bin, I + 1) =:= $- of
     true ->
@@ -67,12 +67,12 @@ parse_boundary_tail(Bin, Pattern, I) when I + 1 < byte_size(Bin) ->
     false ->
       % No dash after boundary, proceed with unknown chars and lwsp removal.
       parse_boundary_eol(Bin, Pattern, I) end;
-parse_boundary_tail(Bin, Pattern, _I) ->
+parse_boundary_tail(Bin, Pattern, I) ->
   % Boundary may be followed by "--", need more data.
-  Rest = <<(binary:last(Bin))>>,
+  Rest = binary_part(Bin, I, byte_size(Bin) - I),
   more(Rest, fun (NewBin) -> parse_boundary_tail(NewBin, Pattern, 0) end).
 
--spec parse_boundary_eol(binary(), pattern(), pos()) -> part_result().
+-spec parse_boundary_eol(binary(), pattern(), pos()) -> more(part_result()).
 parse_boundary_eol(Bin, Pattern, I) ->
   case binary:match(Bin, <<"\r\n">>, [{scope, {I, byte_size(Bin) - I}}]) of
     {CrlfStart, _Length} ->
@@ -86,7 +86,7 @@ parse_boundary_eol(Bin, Pattern, I) ->
       Cont = fun (NewBin) -> parse_boundary_eol(NewBin, Pattern, 0) end,
       more(Rest, Cont) end.
 
--spec parse_boundary_crlf(binary(), pattern(), pos()) -> part_result().
+-spec parse_boundary_crlf(binary(), pattern(), pos()) -> more(part_result()).
 parse_boundary_crlf(Bin, Pattern, I) ->
   % The binary is at least I + 2 bytes long as this function is only called by
   % parse_boundary_eol/3 when CRLF has been found so a more tuple will never
@@ -102,11 +102,12 @@ parse_boundary_crlf(Bin, Pattern, I) ->
       % considered part of the boundary so EOL needs to be searched again.
       parse_boundary_eol(Bin, Pattern, I) end.
 
--spec parse_headers(binary(), pattern()) -> part_result().
+-spec parse_headers(binary(), pattern()) -> more(part_result()).
 parse_headers(Bin, Pattern) ->
   parse_headers(Bin, Pattern, []).
 
--spec parse_headers(binary(), pattern(), http_headers()) -> part_result().
+-spec parse_headers(binary(), pattern(), http_headers()) ->
+                     more(part_result()).
 parse_headers(Bin, Pattern, Acc) ->
   case erlang:decode_packet(httph_bin, Bin, []) of
     {ok, {http_header, _, Name, _, Value}, Rest} ->
@@ -119,7 +120,7 @@ parse_headers(Bin, Pattern, Acc) ->
     {more, _} ->
       more(Bin, fun (NewBin) -> parse_headers(NewBin, Pattern, Acc) end) end.
 
--spec parse_body(binary(), pattern()) -> body().
+-spec parse_body(binary(), pattern()) -> more(body_result()).
 parse_body(Bin, Pattern = {P, PSize}) when byte_size(Bin) >= PSize ->
   case binary:match(Bin, P) of
     {0, _Length} ->
@@ -141,9 +142,8 @@ parse_body(Bin, Pattern) ->
 end_of_part(Bin, Pattern, I) ->
   {end_of_part, fun () -> parse_boundary_tail(Bin, Pattern, I) end}.
 
--spec skip(binary(), pattern()) -> part_result().
+-spec skip(binary(), pattern()) -> more(part_result()).
 skip(Bin, Pattern = {P, PSize}) ->
-  BinSize = byte_size(Bin),
   case binary:match(Bin, P) of
     {BoundaryStart, _Length} ->
       % Initial boundary found, skip preamble and proceed with headers parsing
@@ -155,7 +155,9 @@ skip(Bin, Pattern = {P, PSize}) ->
       <<_:RestStart/binary, Rest/binary>> = Bin,
       more(Rest, fun (NewBin) -> skip(NewBin, Pattern) end) end.
 
--spec more(binary(), fun((binary()) -> T)) -> {more, fun((binary()) -> T)}.
+-spec more(binary(), parser(T)) -> {more, parser(T)}.
+more(<<>>, F) ->
+  {more, F};
 more(Bin, F) ->
   {more, fun (NewData) when is_binary(NewData) ->
                F(<<Bin/binary, NewData/binary>>) end}.
